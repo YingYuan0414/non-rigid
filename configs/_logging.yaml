@@ -21,7 +21,7 @@ lightning:
 
 wandb:
   entity: r-pad
-  project: non_rigid
+  project: tax3d_square_d2
 
   # Group is for grouping runs together (i.e. a train run and an eval run).
   group: ???

@@ -54,7 +54,7 @@ elif [ $MODEL_TYPE == "cross_point_relative" ]; then
   echo "Training relative point model with command: $COMMAND."
 
   MODEL_PARAMS="model=df_cross model.type=point"
-  DATASET_PARAMS="dataset=dedo dataset.scene=False dataset.world_frame=False"
+  DATASET_PARAMS="dataset=mimicgen dataset.scene=False dataset.world_frame=False"
 # flow regression baseline
 elif [ $MODEL_TYPE == "regression_flow" ]; then
   echo "Training flow regression model with command: $COMMAND."
@@ -74,6 +74,6 @@ fi
 WANDB_MODE=$WANDB_MODE python train.py \
   $MODEL_PARAMS \
   $DATASET_PARAMS \
-  wandb.group=dedo \
+  wandb.group=mimicgen \
   resources.gpus=[${GPU_INDEX}] \
   $COMMAND

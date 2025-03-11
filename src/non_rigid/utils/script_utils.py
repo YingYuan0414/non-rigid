@@ -30,6 +30,7 @@ from non_rigid.models.tax3dv2 import (
 
 from non_rigid.datasets.proc_cloth_flow import ProcClothFlowDataModule
 from non_rigid.datasets.dedo import DedoDataModule
+from non_rigid.datasets.mimicgen import MimicGenDataModule
 
 
 PROJECT_ROOT = str(pathlib.Path(__file__).parent.parent.parent.parent.resolve())
@@ -86,6 +87,8 @@ def create_datamodule(cfg):
         datamodule_fn = ProcClothFlowDataModule
     elif cfg.dataset.name == "dedo":
         datamodule_fn = DedoDataModule
+    elif cfg.dataset.name == "mimicgen":
+        datamodule_fn = MimicGenDataModule
     else:
         raise ValueError(f"Invalid dataset name: {cfg.dataset.name}")
 

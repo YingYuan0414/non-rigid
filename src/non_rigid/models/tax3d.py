@@ -283,7 +283,7 @@ class DenseDisplacementDiffusionModule(L.LightningModule):
 
         # computing error metrics
         seg = seg == 0
-        rmse = flow_rmse(pred, ground_truth, mask=True, seg=seg).reshape(bs, num_samples)
+        rmse = flow_rmse(pred, ground_truth, mask=False, seg=seg).reshape(bs, num_samples)
         pred = pred.reshape(bs, num_samples, -1, 3)
 
         # computing winner-take-all metrics
