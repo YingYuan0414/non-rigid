@@ -33,6 +33,8 @@ class MimicGenDataset(data.Dataset):
             self.size = size
         else:
             self.size = self.num_demos
+
+        self.size = self.size - self.size % 16
         print(f"Dataset split: {self.split}, size: {self.size}")
 
         # setting sample sizes
