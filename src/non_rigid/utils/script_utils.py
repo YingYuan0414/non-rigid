@@ -23,6 +23,7 @@ from non_rigid.models.tax3d_v2 import (
 )
 
 from non_rigid.datasets.dedo import DedoDataModule
+from non_rigid.datasets.dro import DexDataModule
 from non_rigid.datasets.rigid import RigidDataModule
 
 PROJECT_ROOT = str(pathlib.Path(__file__).parent.parent.parent.parent.resolve())
@@ -66,6 +67,8 @@ def create_datamodule(cfg):
         datamodule_fn = DedoDataModule
     elif cfg.dataset.material == "rigid":
         datamodule_fn = RigidDataModule
+    elif cfg.dataset.material == "hand":
+        datamodule_fn = DexDataModule
 
     # job-specific datamodule pre-processing
     if cfg.mode == "eval":
