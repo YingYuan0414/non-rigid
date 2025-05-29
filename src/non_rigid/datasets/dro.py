@@ -114,11 +114,14 @@ class DexDataset(data.Dataset):
             hand = self.hands[robot_name]
             initial_q = hand.get_initial_q()
             robot_pc_initial = hand.get_transformed_links_pc(initial_q)[:, :3]
-            robot_pc_target = hand.get_transformed_links_pc(initial_q)[:, :3]  # same as initial, just a placeholder
+            robot_pc_target = torch.zeros_like(robot_pc_initial)  # same as initial, just a placeholder
 
             name = object_name.split('+')
             object_path = os.path.join(self.dataset_cfg.data_dir, f'data/PointCloud/object/{name[0]}/{name[1]}.pt')
             object_pc = torch.load(object_path)[:, :3]
+        
+        # zero-mean the initial robot point cloud
+        robot_pc_initial = robot_pc_initial - robot_pc_initial.mean(axis=0, keepdim=True)
 
         action_pc = robot_pc_initial.float()
         anchor_pc = object_pc.float()
