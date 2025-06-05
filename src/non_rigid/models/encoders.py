@@ -181,8 +181,19 @@ class JointFeatureEncoder(nn.Module):
         
         # Encode base features - action-frame, and prediction frame.
         action_size = x0.shape[-1]
-        action_enc = self.action_encoder(x0)
-        pred_enc = self.pred_encoder(torch.cat([x_recon, y], dim=-1))
+        x0_onehot = torch.zeros((x0.shape[0], 3, action_size), device=x0.device)
+        x0_onehot[:, 2, :] = 1
+        x0_wh = torch.cat([x0, x0_onehot], dim=1)  
+        action_enc = self.action_encoder(x0_wh[:, :self.in_channels, :])  # paper: object embedding o_j
+        
+        x_recon_onehot = torch.zeros((x_recon.shape[0], 3, action_size), device=x_recon.device)
+        x_recon_onehot[:, 0, :] = 1
+        y_onehot = torch.zeros((y.shape[0], 3, y.shape[2]), device=y.device)
+        y_onehot[:, 1, :] = 1
+        x_recon_wh = torch.cat([x_recon, x_recon_onehot], dim=1)
+        y_wh = torch.cat([y, y_onehot], dim=1)  
+        pred_enc = self.pred_encoder(torch.cat([x_recon_wh[:, :self.in_channels, :], y_wh[:, :self.in_channels, :]], dim=-1))  # paper: reconstructed placement -> reconstruction embedding f_i
+        
         action_pred_enc, anchor_pred_enc = pred_enc[:, :, :action_size], pred_enc[:, :, action_size:]
         anchor_pred_enc = anchor_pred_enc.permute(0, 2, 1)
 
@@ -191,7 +202,7 @@ class JointFeatureEncoder(nn.Module):
             shape = x_recon - torch.mean(x_recon, dim=2, keepdim=True)
             flow_zeromean = x_flow - torch.mean(x_flow, dim=2, keepdim=True)
             feature_enc = self.feature_encoder(
-                torch.cat([shape, x_flow, flow_zeromean], dim=1)
+                torch.cat([shape, x_flow, flow_zeromean], dim=1)  # paper: displacements -> deformation embedding d_k
             )
             action_features = [action_enc, action_pred_enc, feature_enc]
         else:
