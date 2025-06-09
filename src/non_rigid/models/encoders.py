@@ -4,12 +4,26 @@ import torch_geometric.data as tgd
 import numpy as np
 
 from non_rigid.nets.pn2 import PN2Dense, PN2DenseParams
+from non_rigid.nets.encoder import Encoder
 
 from functools import partial
 
 #################################################################################
 #                               Point Cloud Encoders                            #
 #################################################################################
+
+def dgcnn_encoder(emb_dim, pretrain=None, device=torch.device('cpu')) -> nn.Module:
+    encoder = Encoder(emb_dim=emb_dim)
+    if pretrain is not None:
+        print(f"******** Load embedding network pretrain from <{pretrain}> ********")
+        encoder.load_state_dict(
+            torch.load(
+                f"/home/yingyuan/non-rigid/ckpt/pretrain/{pretrain}",
+                map_location=device
+            )
+        )
+    encoder.to(device)
+    return encoder
 
 def mlp_encoder(in_channels, out_channels):
     """
@@ -151,19 +165,24 @@ class JointFeatureEncoder(nn.Module):
 
         # Initializing point cloud encoder wrapper.
         if self.model_cfg.point_encoder == "mlp":
-            encoder_fn = partial(mlp_encoder, in_channels=self.in_channels)
+            encoder_fn = partial(mlp_encoder, in_channels=self.in_channels, out_channels=hidden_size)
         elif self.model_cfg.point_encoder == "pn2":
-            encoder_fn = partial(pn2_encoder, in_channels=self.in_channels, model_cfg=self.model_cfg)
+            encoder_fn = partial(pn2_encoder, in_channels=self.in_channels, out_channels=hidden_size, model_cfg=self.model_cfg)
+        elif self.model_cfg.point_encoder == "dgcnn":  # hidden_size should be 512 to match pre-trained DRO model.
+            self.action_encoder = dgcnn_encoder(emb_dim=hidden_size, pretrain="pretrain_3robots_128.pth", device='cuda')
+            # self.pred_encoder = dgcnn_encoder(emb_dim=hidden_size, device='cuda')
+            self.pred_encoder = pn2_encoder(in_channels=self.in_channels, out_channels=hidden_size, model_cfg=self.model_cfg)
         else:
             raise ValueError(f"Invalid point_encoder: {self.model_cfg.point_encoder}")
 
         # Creating base encoders - action-frame, and prediction-frame.
-        self.action_encoder = encoder_fn(out_channels=hidden_size)
-        self.pred_encoder = encoder_fn(out_channels=hidden_size)
+        if self.model_cfg.point_encoder != "dgcnn":
+            self.action_encoder = encoder_fn()
+            self.pred_encoder = encoder_fn()
 
         # Creating extra feature encoders, if necessary.
         if self.model_cfg.feature:
-            self.feature_encoder = encoder_fn(in_channels=9, out_channels=hidden_size)
+            self.feature_encoder = pn2_encoder(in_channels=9, out_channels=hidden_size, model_cfg=self.model_cfg)
             self.action_mixer = mlp_encoder(3 * hidden_size, hidden_size)
         else:
             self.action_mixer = mlp_encoder(2 * hidden_size, hidden_size)
@@ -181,17 +200,29 @@ class JointFeatureEncoder(nn.Module):
         
         # Encode base features - action-frame, and prediction frame.
         action_size = x0.shape[-1]
-        x0_onehot = torch.zeros((x0.shape[0], 3, action_size), device=x0.device)
-        x0_onehot[:, 2, :] = 1
-        x0_wh = torch.cat([x0, x0_onehot], dim=1)  
+
+        if self.model_cfg.point_encoder != "dgcnn":
+            x0_onehot = torch.zeros((x0.shape[0], 3, action_size), device=x0.device)
+            x0_onehot[:, 2, :] = 1
+            x0_wh = torch.cat([x0, x0_onehot], dim=1)  
+        else:
+            x0_wh = x0
+
         action_enc = self.action_encoder(x0_wh[:, :self.in_channels, :])  # paper: object embedding o_j
+        if self.model_cfg.point_encoder == "dgcnn":
+            action_enc = action_enc.detach()
         
-        x_recon_onehot = torch.zeros((x_recon.shape[0], 3, action_size), device=x_recon.device)
-        x_recon_onehot[:, 0, :] = 1
-        y_onehot = torch.zeros((y.shape[0], 3, y.shape[2]), device=y.device)
-        y_onehot[:, 1, :] = 1
-        x_recon_wh = torch.cat([x_recon, x_recon_onehot], dim=1)
-        y_wh = torch.cat([y, y_onehot], dim=1)  
+        if self.model_cfg.point_encoder != "dgcnn":
+            x_recon_onehot = torch.zeros((x_recon.shape[0], 3, action_size), device=x_recon.device)
+            x_recon_onehot[:, 0, :] = 1
+            y_onehot = torch.zeros((y.shape[0], 3, y.shape[2]), device=y.device)
+            y_onehot[:, 1, :] = 1
+            x_recon_wh = torch.cat([x_recon, x_recon_onehot], dim=1)
+            y_wh = torch.cat([y, y_onehot], dim=1) 
+        else:
+            x_recon_wh = x_recon
+            y_wh = y
+
         pred_enc = self.pred_encoder(torch.cat([x_recon_wh[:, :self.in_channels, :], y_wh[:, :self.in_channels, :]], dim=-1))  # paper: reconstructed placement -> reconstruction embedding f_i
         
         action_pred_enc, anchor_pred_enc = pred_enc[:, :, :action_size], pred_enc[:, :, action_size:]
