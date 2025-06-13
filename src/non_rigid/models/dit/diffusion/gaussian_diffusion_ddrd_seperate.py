@@ -11,6 +11,7 @@ import torch as th
 import enum
 
 from .diffusion_utils import discretized_gaussian_log_likelihood, normal_kl
+from pytorch3d.ops import knn_points
 
 
 def mean_flat(tensor):
@@ -141,7 +142,7 @@ def betas_for_alpha_bar(num_diffusion_timesteps, alpha_bar, max_beta=0.999):
     return np.array(betas)
 
 
-def calculate_depth(robot_pc, object_names):
+def calculate_depth(robot_pc, object_pc, object_normals):
     """
     Calculate the average penetration depth of predicted pc into the object.
 
@@ -149,27 +150,19 @@ def calculate_depth(robot_pc, object_names):
     :param object_name: list<str>, len = B
     :return: calculated depth, (B,)
     """
-    object_pc_list = []
-    normals_list = []
+    knn = knn_points(robot_pc, object_pc, K=1, return_nn=True)  # [B, N, 1]
+    distances = knn.dists[..., 0].sqrt()  # [B, N]
+    object_pc_nn = knn.knn[..., 0]  # [B, N, 3]
 
-    for object_name in object_names:
-        name = object_name.split('+')
-        object_path = '/home/yingyuan/DRO-Grasp/data/PointCloud/object/{name[0]}/{name[1]}.pt'.format(name=name)
-        object_pc_normals = torch.load(object_path).to(robot_pc.device)
-        object_pc_list.append(object_pc_normals[:, :3])
-        normals_list.append(object_pc_normals[:, 3:])
-    object_pc = torch.stack(object_pc_list, dim=0)
-    normals = torch.stack(normals_list, dim=0)
+    idx = knn.idx[..., 0].unsqueeze(-1).repeat(1, 1, 3)  # [B, N, 3]
+    normals_nn = torch.gather(object_normals, 1, idx)  # [B, N, 3]
 
-    distance = torch.cdist(robot_pc, object_pc)
-    distance, index = torch.min(distance, dim=-1)
-    index = index.unsqueeze(-1).repeat(1, 1, 3)
-    object_pc_indexed = torch.gather(object_pc, dim=1, index=index)
-    normals_indexed = torch.gather(normals, dim=1, index=index)
-    get_sign = torch.vmap(torch.vmap(lambda x, y: torch.where(torch.dot(x, y) >= 0, 1, -1)))
-    signed_distance = distance * get_sign(robot_pc - object_pc_indexed, normals_indexed)
-    signed_distance[signed_distance > 0] = 0
-    return -torch.mean(signed_distance)
+    diff = robot_pc - object_pc_nn  # [B, N, 3]
+    sign = torch.where((diff * normals_nn).sum(-1) >= 0, 1.0, -1.0)  # [B, N]
+    signed_distance = distances * sign  # [B, N]
+    signed_distance[signed_distance > 0] = 0  # Only keep penetrations
+
+    return -signed_distance.mean()
 
 
 class GaussianDiffusionDDRDSeparate:
@@ -919,7 +912,7 @@ class GaussianDiffusionDDRDSeparate:
         w_r = 1.0 - coeff
         return w_r, w_s
 
-    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None, object_names=None, penetration_weight=0):
+    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None, object_pc=None, object_normals=None, penetration_weight=0):
         """
         Compute training losses for a single timestep using separate forward processes for
         the reference (R) and shape (S) components.
@@ -1048,12 +1041,12 @@ class GaussianDiffusionDDRDSeparate:
 
             # TODO: penetration loss
             if penetration_weight > 0:
-                assert object_names is not None, "Object names must be provided for penetration loss."
+                assert object_pc is not None, "Object must be provided for penetration loss."
                 pred_xstart_r = self._predict_xstart_from_eps(xr_t, t, model_output_r)
                 pred_xstart_s = self._predict_xstart_from_eps(xs_t, t, model_output_s)
                 pred_xstart = pred_xstart_r + pred_xstart_s
                 pred_xstart = pred_xstart.permute(0, 2, 1)
-                loss_depth = calculate_depth(pred_xstart, object_names)
+                loss_depth = calculate_depth(pred_xstart, object_pc, object_normals)
                 loss_depth = loss_depth.mean()
 
             # Optionally, apply time-based weighting.

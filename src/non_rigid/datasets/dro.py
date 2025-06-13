@@ -67,6 +67,18 @@ class DexDataset(data.Dataset):
         else:
             print("!!! Using fixed object pcs !!!")
 
+        # getting object pc & normals for penetration loss
+        self.pene_object_pc = {}
+        self.pene_normals = {}
+        
+        if self.dataset_cfg.use_pene_loss:
+            for object_name in self.object_names:
+                name = object_name.split('+')
+                object_path = '/home/yingyuan/DRO-Grasp/data/PointCloud/object/{name[0]}/{name[1]}.pt'.format(name=name)
+                object_pc_normals = torch.load(object_path)
+                self.pene_object_pc[object_name] = object_pc_normals[:, :3]
+                self.pene_normals[object_name] = object_pc_normals[:, 3:]
+
         # Determining dataset size - if not specified, use all demos in directory once.
         if self.is_train:
             self.num_demos = len(self.metadata)
@@ -109,6 +121,10 @@ class DexDataset(data.Dataset):
             robot_pc_target = hand.get_transformed_links_pc(target_q)[:, :3]
             initial_q = hand.get_initial_q(target_q)
             robot_pc_initial = hand.get_transformed_links_pc(initial_q)[:, :3]
+
+            if self.dataset_cfg.use_pene_loss:
+                pene_object_pc = self.pene_object_pc[object_name]
+                pene_normals = self.pene_normals[object_name]
         else:
             robot_name, object_name = self.combination[index]
             hand = self.hands[robot_name]
@@ -119,6 +135,10 @@ class DexDataset(data.Dataset):
             name = object_name.split('+')
             object_path = os.path.join(self.dataset_cfg.data_dir, f'data/PointCloud/object/{name[0]}/{name[1]}.pt')
             object_pc = torch.load(object_path)[:, :3]
+
+            if self.dataset_cfg.use_pene_loss:
+                pene_object_pc = self.pene_object_pc[object_name]
+                pene_normals = self.pene_normals[object_name]
         
         # zero-mean the initial robot point cloud
         robot_pc_initial = robot_pc_initial - robot_pc_initial.mean(axis=0, keepdim=True)
@@ -182,11 +202,17 @@ class DexDataset(data.Dataset):
         item["T_goal2world"] = T_goal2world.get_matrix().squeeze(0) # Transform from goal action frame to world frame
         item["T_action2world"] = T_action2world.get_matrix().squeeze(0) # Transform from action frame to world frame
 
+        if self.dataset_cfg.use_pene_loss:
+            item["pene_object_pc"] = pene_object_pc
+            item["pene_normals"] = pene_normals
+        else:
+            item["pene_object_pc"] = None
+            item["pene_normals"] = None
+
         # Training-specific labels.
         # TODO: eventually, rename this key to "point"
         item["pc"] = goal_action_pc # Ground-truth goal action points in the scene frame
         item["flow"] = goal_flow # Ground-truth flow (cross-frame) to action points
-        item["object_names"] = object_name
         
         if self.dataset_cfg.pred_frame == "noisy_goal":
             # "Simulate" the GMM prediction as noisy goal.
@@ -270,6 +296,9 @@ def cloth_collate_fn(batch):
     # we need to convert those to a dictionary of lists
     dict_keys = ["deform_data", "rigid_data", "object_names"]
     keys = batch[0].keys()
+    if batch[0]['pene_object_pc'] is None:
+        dict_keys.append("pene_object_pc")
+        dict_keys.append("pene_normals")
     out = {k: None for k in keys}
     for k in keys:
         if k in dict_keys:

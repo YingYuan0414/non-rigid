@@ -226,7 +226,8 @@ class TAX3Dv2BaseModule(L.LightningModule):
             x_start=ground_truth,
             t=t,
             model_kwargs=model_kwargs,
-            object_names= batch["object_names"],
+            object_pc= batch["pene_object_pc"],
+            object_normals=batch["pene_normals"],
             penetration_weight = self.penetration_weight,
             # noise=noise,
         )
