@@ -21,6 +21,7 @@ train_dataset_size: # None: Use the length of loaded dataset
 val_dataset_size: 400 # None: Use the length of loaded dataset
 test_dataset_size: 400  # None: Use the length of loaded dataset
 val_use_defaults: False # Use default values for some parameters on the validation set
+preprocess: True
 
 sample_size_action: 512
 sample_size_anchor: 512
@@ -41,7 +42,7 @@ action_context_frame: null # frame for action context
 # Dataset-specific Model Parameters
 #####################################################
 # These override the model config.
-pcd_scale: null # Scale range for the point clouds
+pcd_scale: 3.0 # Scale range for the point clouds
 
 #####################################################
 # Data Processing/Augmentation Parameters

@@ -19,7 +19,7 @@ from timm.layers import use_fused_attn
 from typing import Optional
 from functools import partial
 
-from non_rigid.models.encoders import DisjointFeatureEncoder, JointFeatureEncoder
+from non_rigid.models.encoders import DisjointFeatureEncoder, JointFeatureEncoder, mlp_encoder, pn2_encoder
 
 torch.set_printoptions(precision=8, sci_mode=True)
 
@@ -867,6 +867,7 @@ class TAX3Dv2_MuFrame_DiT(nn.Module):
             y: torch.Tensor,
             x0: torch.Tensor,
             rel_pos: Optional[torch.Tensor] = None,
+            finetune_frame: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         """
         Forward pass of DiT with scene cross attention.
@@ -878,9 +879,15 @@ class TAX3Dv2_MuFrame_DiT(nn.Module):
             x0 (torch.Tensor): (B, D, N) tensor of un-noised x (e.g. action) features
         """        
         # Dynamically center anchor in mu-frame.
-        y = y - xr_t
-        # Encode action and anchor features.
-        x_enc, y_enc = self.feature_encoder(x=xs_t, y=y, x0=x0)
+        if finetune_frame is None:
+            y = y - xr_t
+            # Encode action and anchor features.
+            x_enc, y_enc = self.feature_encoder(x=xs_t, y=y, x0=x0)
+        else:
+            y = y - finetune_frame
+            x = xr_t + xs_t
+            # Encode action and anchor features.
+            x_enc, y_enc = self.feature_encoder(x=x, y=y, x0=x0)
 
         # Concatenating reference frame token to the action features.
         x_enc = torch.cat(
@@ -1076,45 +1083,73 @@ class TAX3Dv2_FixedFrame_Dual_DiT(nn.Module):
         self.num_heads = num_heads
         self.model_cfg = model_cfg
 
-        # Initializing point cloud encoder wrapper.
-        if self.model_cfg.point_encoder == "mlp":
-            encoder_fn = partial(mlp_encoder, in_channels=self.in_channels)
-        elif self.model_cfg.point_encoder == "pn2":
-            encoder_fn = partial(pn2_encoder, in_channels=self.in_channels, model_cfg=self.model_cfg)
-        else:
-            raise ValueError(f"Invalid point_encoder: {self.model_cfg.point_encoder}")
+
+
+        x_encoder_hidden_dims = hidden_size // 2
         
-        # Creating base encoders - action-frame, and prediction frame.
-        self.action_encoder = encoder_fn(out_channels=hidden_size)
-        self.pred_encoder = encoder_fn(out_channels=hidden_size)
+        self.x_embedder = nn.Conv1d(
+            in_channels,
+            x_encoder_hidden_dims//2,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True,
+        )
+        
+        self.xr_embedder = nn.Conv1d(
+                in_channels,
+                x_encoder_hidden_dims//2,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+                bias=True,
+        )
 
-        # encoders for xr and xs
-        self.r_encoder = encoder_fn(out_channels=hidden_size)
-        self.s_encoder = encoder_fn(out_channels=hidden_size)
+        self.xs_embedder = nn.Conv1d(
+                in_channels,
+                x_encoder_hidden_dims//2,
+                kernel_size=1,
+                stride=1,
+                padding=0,
+                bias=True,
+        )
 
-        # Creating extra feature encoders, if necessary.
-        # No shape features anymore, since we are encoding them separately
-        if self.model_cfg.feature:
-            self.feature_encoder = encoder_fn(in_channels=6, out_channels=hidden_size)
-            self.action_mixer_r = mlp_encoder(4 * hidden_size, hidden_size)
-            self.action_mixer_s = mlp_encoder(4 * hidden_size, hidden_size)
-        else:
-            self.action_mixer_r = mlp_encoder(3 * hidden_size, hidden_size)
-            self.action_mixer_s = mlp_encoder(3 * hidden_size, hidden_size)
+        # Encoder for y features
+        self.y_embedder = nn.Conv1d(
+            in_channels,
+            hidden_size,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True,
+        )
+        
 
-        # Timestamp embedding.
+        # Encoder for x0 features
+        self.x0_embedder = nn.Conv1d(
+            in_channels,
+            x_encoder_hidden_dims,
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            bias=True,
+        )
+
+        
+        # Timestamp embedding
         self.t_embedder = TimestepEmbedder(hidden_size)
 
-        # DiT blocks.
+        # DiT blocks
+        block_fn = DiTCrossBlock
         self.blocks_r = nn.ModuleList(
             [
-                DiTCrossBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio)
+                block_fn(hidden_size, num_heads, mlp_ratio=mlp_ratio)
                 for _ in range(depth)
             ]
         )
         self.blocks_s = nn.ModuleList(
             [
-                DiTCrossBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio)
+                block_fn(hidden_size, num_heads, mlp_ratio=mlp_ratio)
                 for _ in range(depth)
             ]
         )
@@ -1122,7 +1157,7 @@ class TAX3Dv2_FixedFrame_Dual_DiT(nn.Module):
         self.final_layer_r = FinalLayer_r(hidden_size, 1, self.out_channels)
         self.final_layer_s = FinalLayer_s(hidden_size, 1, self.out_channels)
         self.initialize_weights()
-    
+
     def initialize_weights(self):
         # Initialize transformer layers:
         def _basic_init(module):
@@ -1132,6 +1167,19 @@ class TAX3Dv2_FixedFrame_Dual_DiT(nn.Module):
                     nn.init.constant_(module.bias, 0)
 
         self.apply(_basic_init)
+
+        # Initialize x_embed like nn.Linear (instead of nn.Conv2d):
+        '''
+        w = self.x_embedder.weight.data
+        nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+        nn.init.constant_(self.x_embedder.bias, 0)
+        '''
+        wr = self.xr_embedder.weight.data
+        nn.init.xavier_uniform_(wr.view([wr.shape[0], -1]))
+        nn.init.constant_(self.xr_embedder.bias, 0)
+        ws = self.xs_embedder.weight.data
+        nn.init.xavier_uniform_(ws.view([ws.shape[0], -1]))
+        nn.init.constant_(self.xs_embedder.bias, 0)
 
         # Initialize timestep embedding MLP:
         nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
@@ -1155,7 +1203,7 @@ class TAX3Dv2_FixedFrame_Dual_DiT(nn.Module):
         nn.init.constant_(self.final_layer_s.adaLN_modulation[-1].bias, 0)
         nn.init.constant_(self.final_layer_s.linear.weight, 0)
         nn.init.constant_(self.final_layer_s.linear.bias, 0)
-
+ 
     def forward(
             self,
             xr_t: torch.Tensor,
@@ -1171,55 +1219,55 @@ class TAX3Dv2_FixedFrame_Dual_DiT(nn.Module):
             x (torch.Tensor): (B, D, N) tensor of batched current timestep x (e.g. noised action) features
             t (torch.Tensor): (B,) tensor of diffusion timesteps
             y (torch.Tensor): (B, D, N) tensor of un-noised scene (e.g. anchor) features
-            x0 (torch.Tensor): (B, D, N) tensor of un-noised x (e.g. action) features
+            x0 (Optional[torch.Tensor]): (B, D, N) tensor of un-noised x (e.g. action) features
         """
+        # noise-centering, if enabled
+        '''
+        if self.model_cfg.type == "point":
+            delta_center = torch.mean(x, dim=2, keepdim=True)
+            x = x - delta_center
+            y = y - delta_center
+            x0 = x0 - delta_center
+        elif self.model_cfg.type == "flow":
+            reconstruction = x + x0
+            delta_center = torch.mean(reconstruction, dim=2, keepdim=True)
+            x = x - delta_center
+            y = y - delta_center
+            x0 = x0 - delta_center
+        '''
+        
+        # encode x, y, x0 features
+        
         x = xr_t + xs_t
-        if self.model_cfg.type == "flow":
-            x_flow = x
-            x_recon = x + x0
-        else:
-            x_flow = x - x0
-            x_recon = x
+        recon_emb = self.x_embedder(x)
+        
+        xr_emb = self.xr_embedder(xr_t)
+        xr_emb_exp = xr_emb.expand(-1, -1, recon_emb.size(-1))  # [B, hidden_half, N]
+        xr_emb = torch.cat([xr_emb_exp, recon_emb], dim=1)
 
-        # Encode base features - action-frame, and prediction frame.
-        action_size = x0.shape[-1]
-        action_enc = self.action_encoder(x0)
-        pred_enc = self.pred_encoder(torch.cat([x_recon, y], dim=-1))
-        action_pred_enc, anchor_pred_enc = pred_enc[:, :, :action_size], pred_enc[:, :, action_size:]
-        anchor_pred_enc = anchor_pred_enc.permute(0, 2, 1)
+        xs_emb = self.xs_embedder(xs_t)
+        xs_emb = torch.cat([xs_emb, recon_emb], dim=1)
 
-        r_enc = self.r_encoder(xr_t)
-        r_enc = r_enc.expand(-1, -1, action_enc.size(-1))
-        s_enc = self.s_encoder(xs_t)
 
-        # Encode extra features, if necessary.
-        if self.model_cfg.feature:
-            flow_zeromean = x_flow - torch.mean(x_flow, dim=2, keepdim=True)
-            feature_enc = self.feature_encoder(
-                torch.cat([x_flow, flow_zeromean], dim=1)
-            )
-            action_features_r = [action_enc, r_enc, action_pred_enc, feature_enc]
-            action_features_s = [action_enc, s_enc, action_pred_enc, feature_enc]
-        else:
-            action_features_r = [action_enc, r_enc, action_pred_enc]
-            action_features_s = [action_enc, s_enc, action_pred_enc]
+        x0_emb = self.x0_embedder(x0)
+        xr_emb = torch.cat([xr_emb, x0_emb], dim=1)
+        xs_emb = torch.cat([xs_emb, x0_emb], dim=1)
 
-        # Compress action features to hidden size through action mixer.
-        xr_enc = torch.cat(action_features_r, dim=1)
-        xr_enc = self.action_mixer_r(xr_enc).permute(0, 2, 1)
+        y_emb = self.y_embedder(y)
+        y_emb = y_emb.permute(0, 2, 1)
 
-        xs_enc = torch.cat(action_features_s, dim=1)
-        xs_enc = self.action_mixer_s(xs_enc).permute(0, 2, 1)
+        xr = xr_emb.permute(0, 2, 1)
+        xs = xs_emb.permute(0, 2, 1)
 
-        # Timestep embedding.
+        # timestep embedding
         t_emb = self.t_embedder(t)
 
         # forward pass through DiT blocks
         for block in self.blocks_r:
-            xr = block(xr_enc, anchor_pred_enc, t_emb)
+            xr = block(xr, y_emb, t_emb)
         for block in self.blocks_s:
-
-            xs = block(xs_enc, anchor_pred_enc, t_emb)
+            xs = block(xs, y_emb, t_emb)
+        # (8,512, 128)
 
         # final layer
         xs = self.final_layer_s(xs, t_emb) # (8,512, 6)

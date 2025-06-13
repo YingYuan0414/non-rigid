@@ -15,14 +15,14 @@ from non_rigid.models.dit.models import DiT_PointCloud_Cross
 #################################################################################
 
 class FrameGMMPredictor(nn.Module):
-    def __init__(self, model_cfg, device):
+    def __init__(self, network, model_cfg, device):
         super(FrameGMMPredictor, self).__init__()
 
         # Hacky architecture assertions to enforce model configuration.
         assert model_cfg.name == "df_cross", "FrameGMMPredictor is only compatible with df_cross model."
         assert model_cfg.in_channels == 3, "FrameGMMPredictor is only compatible with 3 input channels."
         assert model_cfg.learn_sigma == True, "FrameGMMPredictor must learn sigma."
-        assert model_cfg.point_encoder == "mlp", "FrameGMMPredictor is only compatible with MLP point encoder."
+        # assert model_cfg.point_encoder == "mlp", "FrameGMMPredictor is only compatible with MLP point encoder."
         assert model_cfg.joint_encode == False, "FrameGMMPredictor is not compatible with joint encoding."
         assert model_cfg.feature == False, "FrameGMMPredictor is not compatible with flow/recon features."
         assert model_cfg.rel_pos == True, "FrameGMMPredictor must use relative position embedding."
@@ -34,26 +34,43 @@ class FrameGMMPredictor(nn.Module):
 
         self.model_cfg = model_cfg
         self.device = device
-        self.model = DiT_PointCloud_Cross(
-            depth=5, 
-            hidden_size=128, 
-            num_heads=4, 
-            in_channels=3, 
-            learn_sigma=True, 
-            model_cfg=model_cfg
-        )
-        self.model.to(self.device)
+        self.network = network
+        self.network.to(self.device)
     
     def forward(self, batch):
         pc_action = batch["pc_action"].to(self.device).permute(0, 2, 1).float()
         pc_anchor = batch["pc_anchor"].to(self.device).permute(0, 2, 1).float()
+
+        # TODO: handle point cloud scaling.
+        if self.model_cfg.object_scale is not None or self.model_cfg.scene_scale is not None:
+            # Computing scale factor.
+            scale = self.model_cfg.pcd_scale
+
+            action_dists = pc_action - pc_action.mean(axis=1, keepdim=True)
+            anchor_dists = pc_anchor - pc_anchor.mean(axis=1, keepdim=True)
+            
+            action_scale = torch.linalg.norm(action_dists, dim=1, keepdim=True).max(dim=2, keepdim=True).values
+            anchor_scale = torch.linalg.norm(anchor_dists, dim=1, keepdim=True).max(dim=2, keepdim=True).values
+
+            point_scale = action_scale if self.model_cfg.object_scale is not None else anchor_scale
+
+            # Updating point clouds.
+            # TODO: notation here is a bit awkward, can clean this up.
+            pc_action = pc_action / point_scale * scale
+            pc_anchor = pc_anchor / point_scale * scale
+            pc_scale = point_scale / scale
+
+        else:
+            anchor_scale = None
+            pc_scale = None
 
         # Updating batch frames.
         action_frame = pc_action.mean(dim=-1, keepdim=True)
         anchor_frame = pc_anchor.mean(dim=-1, keepdim=True)
         pc_action = pc_action - action_frame
         pc_anchor = pc_anchor - anchor_frame
-        rel_pos = (action_frame - anchor_frame).permute(0, 2, 1)
+        # rel_pos = (action_frame - anchor_frame).permute(0, 2, 1)
+        rel_pos = action_frame - anchor_frame
 
         # Getting model kwargs.
         bs = pc_anchor.shape[0]
@@ -62,9 +79,9 @@ class FrameGMMPredictor(nn.Module):
             "y": pc_action,
             "x0": pc_anchor,
             "t": torch.zeros(bs).to(pc_anchor.device),
-           "rel_pos": rel_pos,
+           "rel_pos": rel_pos.permute(0, 2, 1),
         }
-        output = self.model(**model_kwargs).permute(0, 2, 1)
+        output = self.network(**model_kwargs).permute(0, 2, 1)
 
         logits = output[..., [0]]
         residuals = output[..., 1:4]
@@ -79,11 +96,22 @@ class FrameGMMPredictor(nn.Module):
         # converting logits to probabilities
         probs = torch.softmax(logits, dim=1)
 
+        # If necessary, unscale the predictions.
+        if pc_scale is not None:
+            pc_scale = pc_scale.to(pc_anchor.device)
+            means = means * pc_scale.permute(0, 2, 1)
+            residuals = residuals * pc_scale.permute(0, 2, 1)
+            action_frame = action_frame * pc_scale
+            anchor_frame = anchor_frame * pc_scale
+
         return {
             "probs": probs,
             "means": means,
+            "residuals": residuals,
             "action_frame": action_frame.permute(0, 2, 1),
             "anchor_frame": anchor_frame.permute(0, 2, 1),
+            "anchor_scale": anchor_scale,
+            "pc_scale": pc_scale,
         }
 
 #################################################################################
@@ -96,10 +124,10 @@ class GMMLoss(torch.nn.Module):
         eps: value used to clamp var, for stability.
         """
         super(GMMLoss, self).__init__()
-        self.pcd_scale = cfg.dataset.pcd_scale
+        self.pcd_scale = cfg.model.pcd_scale
         self.eps = eps
     
-    def forward(self, batch, pred, var=0.00001, uniform_loss=0.0):
+    def forward(self, batch, pred, var=0.00001, uniform_loss=0.0, regularize_residual=0.0):
         # Computing ground truth action mean in anchor frame.
         anchor_frame = pred["anchor_frame"]
         targets = batch["pc"].to(anchor_frame.device) - anchor_frame
@@ -111,7 +139,12 @@ class GMMLoss(torch.nn.Module):
 
         # Computing GMM likelihood loss.
         diff = targets - means
+
+        if pred["pc_scale"] is not None:
+            # var *= pred["pc_scale"].permute(0, 2, 1)
+            var *= pred["anchor_scale"].permute(0, 2, 1)
         var *= self.pcd_scale
+        
         point_likelihood_exps = -0.5 * torch.sum((diff ** 2) / var, dim=-1, keepdim=True)
         maxlog = point_likelihood_exps.max(dim=-2, keepdim=True).values
         point_likelihoods = torch.exp(point_likelihood_exps - maxlog)
@@ -126,6 +159,12 @@ class GMMLoss(torch.nn.Module):
                 torch.log(torch.sum(point_likelihoods, dim=-2, keepdim=True)) + maxlog
             )
             loss += uniform_loss * uniform_nll
+        
+        # Regularization term.
+        if regularize_residual > 0.0:
+            residuals = pred["residuals"]
+            residual_loss = torch.norm(residuals, dim=-1).mean()
+            loss += regularize_residual * residual_loss
         return loss
 
 #################################################################################
@@ -156,16 +195,10 @@ def viz_gmm(model, dataset):
         targets = batch["pc"] - anchor_frame
         targets = targets.mean(dim=1)[0].cpu().numpy()
         pc_anchor = (batch["pc_anchor"] - anchor_frame)[0].numpy()
-
+        pc_goal = (batch["pc"] - anchor_frame)[0].numpy()
         # Extracting prediction weights and means.
         probs = pred["probs"][0].cpu().numpy().reshape((-1,))
         means = pred["means"][0].cpu().numpy()
-
-        # breakpoint()
-        # probs = pred["probs"][0].cpu().numpy().reshape((-1,))
-        # target = batch.y.cpu().numpy()[0]
-        # pc_anchor = batch.pos.cpu().numpy()
-        # means = pred["means"][0].cpu().numpy()
 
         # prob statistics
         prob_min, prob_max, prob_med = probs.min(), probs.max(), np.median(probs)
@@ -179,6 +212,15 @@ def viz_gmm(model, dataset):
                 x=pc_anchor[:, 0],
                 y=pc_anchor[:, 1],
                 z=pc_anchor[:, 2],
+            ), row=i+1, col=1
+        )
+        fig.add_trace(
+            go.Scatter3d(
+                mode="markers",
+                marker=dict(size=2, color="green"),
+                x=pc_goal[:, 0],
+                y=pc_goal[:, 1],
+                z=pc_goal[:, 2],
             ), row=i+1, col=1
         )
         fig.add_trace(
@@ -217,6 +259,15 @@ def viz_gmm(model, dataset):
         fig.add_trace(
             go.Scatter3d(
                 mode="markers",
+                marker=dict(size=2, color="green"),
+                x=pc_goal[:, 0],
+                y=pc_goal[:, 1],
+                z=pc_goal[:, 2],
+            ), row=i+1, col=2
+        )
+        fig.add_trace(
+            go.Scatter3d(
+                mode="markers",
                 marker=dict(size=4, color=probs99, colorscale="Viridis", cmin=0),
                 x=means99[:, 0],
                 y=means99[:, 1],
@@ -250,6 +301,15 @@ def viz_gmm(model, dataset):
         fig.add_trace(
             go.Scatter3d(
                 mode="markers",
+                marker=dict(size=2, color="green"),
+                x=pc_goal[:, 0],
+                y=pc_goal[:, 1],
+                z=pc_goal[:, 2],
+            ), row=i+1, col=3
+        )
+        fig.add_trace(
+            go.Scatter3d(
+                mode="markers",
                 marker=dict(size=4, color=probs90, colorscale="Viridis", cmin=0),
                 x=means90[:, 0],
                 y=means90[:, 1],
@@ -278,6 +338,15 @@ def viz_gmm(model, dataset):
                 x=pc_anchor[:, 0],
                 y=pc_anchor[:, 1],
                 z=pc_anchor[:, 2],
+            ), row=i+1, col=4
+        )
+        fig.add_trace(
+            go.Scatter3d(
+                mode="markers",
+                marker=dict(size=2, color="green"),
+                x=pc_goal[:, 0],
+                y=pc_goal[:, 1],
+                z=pc_goal[:, 2],
             ), row=i+1, col=4
         )
         fig.add_trace(

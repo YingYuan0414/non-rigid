@@ -135,10 +135,11 @@ class TrainDP3Workspace:
                 model=self.ema_model)
 
         # configure env
-        env_runner: BaseRunner
-        env_runner = hydra.utils.instantiate(
-            cfg.task.env_runner,
-            output_dir=self.output_dir)
+        # env_runner: BaseRunner
+        # env_runner = hydra.utils.instantiate(
+        #     cfg.task.env_runner,
+        #     output_dir=self.output_dir)
+        env_runner = None
         
         if env_runner is not None:
             assert isinstance(env_runner, BaseRunner)
@@ -410,7 +411,7 @@ class TrainDP3Workspace:
         env_runner: BaseRunner
         env_runner = hydra.utils.instantiate(
             cfg.task.env_runner,
-            output_dir=self.output_dir, viz=True)
+            output_dir=self.output_dir, viz=False)
         assert isinstance(env_runner, BaseRunner)
         policy = self.model
         if cfg.training.use_ema:
@@ -418,12 +419,12 @@ class TrainDP3Workspace:
         policy.eval()
         policy.cuda()
 
-        runner_log = env_runner.run_dataset(policy, dataset_dir, 'train')
+        # runner_log = env_runner.run_dataset(policy, dataset_dir, 'train')
 
-        cprint(f"---------------- Eval Results for Train --------------", 'magenta')
-        for key, value in runner_log.items():
-            if isinstance(value, float):
-                cprint(f"{key}: {value:.4f}", 'magenta')
+        # cprint(f"---------------- Eval Results for Train --------------", 'magenta')
+        # for key, value in runner_log.items():
+        #     if isinstance(value, float):
+        #         cprint(f"{key}: {value:.4f}", 'magenta')
 
         runner_log = env_runner.run_dataset(policy, dataset_dir, 'val')
 

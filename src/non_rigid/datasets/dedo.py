@@ -16,7 +16,6 @@ from non_rigid.utils.augmentation_utils import plane_occlusion
 import rpad.visualize_3d.plots as vpl
 import plotly.graph_objects as go
 
-
 class DedoDataset(data.Dataset):
     def __init__(self, root, dataset_cfg, split):
         super().__init__()

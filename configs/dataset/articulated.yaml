@@ -1,0 +1,43 @@
+name: articulated
+
+#####################################################
+# Dataset Parameters
+#####################################################
+data_dir: "~/data/partnet"
+material: deform
+
+train_size: null # (int, null) Length of the train dataset
+val_size: null # (int, null) Length of the validation dataset
+
+sample_size_action: 512
+sample_size_anchor: 512
+downsample_type: fps
+
+#####################################################
+# Model Dataset/Data-processing Parameters
+#####################################################
+# These are shared and overridden by the model config.
+pred_frame: null # frame for goal prediction
+noisy_goal_scale: null # noise scale for simulated GMM error
+action_context_frame: null # frame for action context
+
+#####################################################
+# Dataset-specific Model Parameters
+#####################################################
+# These override the model config.
+pcd_scale: 12.0 # Scale range for the point clouds
+
+#####################################################
+# Environment-specific Parameters
+#####################################################
+link_type:
+  - "door"
+  - "rotation_door"
+
+#####################################################
+# Data Processing/Augmentation Parameters
+#####################################################
+pcd_scale_factor: 1.0 # Scale factor for the point clouds
+scene_transform_type: random_flat_upright # Transformation type to apply to the scene
+translation_variance: 0.0 # Translation variance of the demo transformation
+rotation_variance: 180 # Rotation variance of the demo transformation

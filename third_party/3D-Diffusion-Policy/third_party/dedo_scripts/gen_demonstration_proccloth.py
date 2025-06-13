@@ -90,11 +90,11 @@ if __name__ == '__main__':
     exp_name_dir = (
         f'cloth={cloth_geometry}-{cloth_pose} ' + \
         f'anchor={anchor_geometry}-{anchor_pose} ' + \
-        f'hole={cloth_hole}{tag} ' + \
+        f'hole={cloth_hole} ' + \
         f'robot={use_robot_env} ' + \
         # f'num_anchors={num_anchors}'
         f'num_anchors={num_anchors} ' + \
-        'dp3'
+        f'dp3 {tag}'
     )
 
     # creating directories

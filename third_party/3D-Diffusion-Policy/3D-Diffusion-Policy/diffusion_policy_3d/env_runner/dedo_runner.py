@@ -195,12 +195,16 @@ class DedoRunner(BaseRunner):
     
     # def run_dataset(self, policy: BasePolicy, dataset: data.Dataset, dataset_name: str):
     def run_dataset(self, policy: BasePolicy, dataset_dir: str, dataset_name: str):
+        # TODO: this is a temporary hack to make evals work
+        dataset_dir = dataset_dir.replace(' dp3', '')
+
         device = policy.device
         dtype = policy.dtype
         env = self.env
-        output_save_dir = os.path.join(self.output_dir, dataset_name)
+        output_save_dir = os.path.join(self.output_dir, dataset_name + "2",)
         dataset = DedoDataset(dataset_dir + f"/{dataset_name}_tax3d")
-
+        
+        breakpoint()
         # creating directory for outputs
         if os.path.exists(output_save_dir):
             cprint(f"Output directory {output_save_dir} already exists. Overwriting...", 'red')
@@ -209,7 +213,7 @@ class DedoRunner(BaseRunner):
 
         # for tax3d goal conditioning, load tax3d predictions from zarr file
         if self.goal_conditioning.startswith('tax3d'):
-            dataset_dir = dataset_dir.replace(' dp3', '')
+            # dataset_dir = dataset_dir.replace(' dp3', '')
             goal_pred_dir = os.path.join(dataset_dir, "tax3d_preds", self.goal_model)
             # roup = zarr.open(dataset_dir + f"/{dataset_name}.zarr", mode='r')
 
@@ -243,10 +247,10 @@ class DedoRunner(BaseRunner):
                 index = np.random.randint(0, goal_pc.shape[0])
                 goal_pc = goal_pc[index]
                 goal_pc = torch.from_numpy(goal_pc).to(device=device)
-                if self.tax3d:
-                    # also grab results for visualization
-                    results = tax3d_pred["results_world"][:, index, ...]
-                    action_pc_indices = tax3d_pred["action_indices"]
+
+                # also grab results for visualization
+                results = tax3d_pred["results_world"][:, index, ...]
+                action_pc_indices = tax3d_pred["action_indices"]
                     
             else:
                 goal_pc = None
@@ -351,14 +355,17 @@ class DedoRunner(BaseRunner):
 
                     # if tax3d, also save the diffusion visualization
                     # grab the first frame, and then plot the time series of results
-                    if self.tax3d:
+                    if self.tax3d or self.goal_conditioning.startswith('tax3d'):
                         color_key = info["color_key"].squeeze(0)[action_pc_indices]
                         viewmat = info["viewmat"].squeeze(0)
 
                         # get img from vid_frames
                         # get results from action_dict
                         img = vid_frames[0]
-                        results = policy.results_world
+                        if self.tax3d:
+                            results = policy.results_world
+                        else:
+                            results = [res for res in results]
                         diffusion_frames = plot_diffusion(img, results, viewmat, color_key)
                         diffusion_save_path = os.path.join(output_save_dir, f'{id}_{vid_tag}_diffusion.gif')
                         diffusion_frames[0].save(diffusion_save_path, save_all=True,

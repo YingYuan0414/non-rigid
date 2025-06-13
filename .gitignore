@@ -389,3 +389,4 @@ logs/
 .singularity_images/
 /scripts/vis
 /scripts/draft.py
+/scripts/legacy

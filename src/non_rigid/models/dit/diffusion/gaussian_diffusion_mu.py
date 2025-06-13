@@ -360,10 +360,8 @@ class GaussianDiffusionMuFrame:
         }
 
         return out_r, out_s
-    
-    # p_mean_variance_reverse for delta_t = 0
-    '''
-    def p_mean_variance_reverse(self, model, pred_ref, xr_t, xs_t, t, clip_denoised=True, denoised_fn=None, model_kwargs=None):
+
+    def p_mean_variance_finetune(self, model, xr_t, xs_t, t, finetune_frame, clip_denoised=True, denoised_fn=None, model_kwargs=None):
         """
         Apply the model to get p(x_{t-1} | x_t) and a prediction of x₀ separately for the
         reference and shape branches.
@@ -393,8 +391,8 @@ class GaussianDiffusionMuFrame:
         # Expected shapes:
         #   model_output_r: [B, 2C, 1]  for reference branch
         #   model_output_s: [B, 2C, N]  for shape branch
-        zr_t = pred_ref + xr_t
-        model_output_r, model_output_s = model(zr_t, xs_t, t, **model_kwargs)
+        model_kwargs["finetune_frame"] = finetune_frame
+        model_output_r, model_output_s = model(xr_t, xs_t, t, **model_kwargs)
         extra = None
 
         def process_xstart(x):
@@ -423,21 +421,16 @@ class GaussianDiffusionMuFrame:
         # this is not strictly a diffusion objective, and you cannot use
         # the noise equation to revert the xstart !!!
         if self.model_mean_type == ModelMeanType.START_X:
-            raise NotImplementedError
-            #pred_xstart_r = process_xstart(ref_noise)
+            pred_xstart_r = process_xstart(ref_noise)
         else:
-            #pred_xstart_r = process_xstart(self._predict_xstart_from_eps(x_t=xr_t, t=t, eps=ref_noise))
-            # NOTE: we dont calculate z_0 here; instead, we calculate delta_0:
-            pred_deltastart = process_xstart(self._predict_xstart_from_eps(x_t=xr_t, t=t, eps=ref_noise))
-
+            pred_xstart_r = process_xstart(self._predict_xstart_from_eps(x_t=xr_t, t=t, eps=ref_noise))
         # Compute the branch's posterior mean using its own noisy input.
-        # NOTE: so here, the output is for the delta, not z!
-        out_r_mean, _, _ = self.q_posterior_mean_variance(x_start=pred_deltastart, x_t=xr_t, t=t)
+        out_r_mean, _, _ = self.q_posterior_mean_variance(x_start=pred_xstart_r, x_t=xr_t, t=t)
         out_r = {
             "mean": out_r_mean,
             "variance": model_variance_r,
             "log_variance": th.log(model_variance_r + 1e-8),
-            "pred_xstart": pred_deltastart,
+            "pred_xstart": pred_xstart_r,
             "extra": extra,
         }
 
@@ -468,7 +461,6 @@ class GaussianDiffusionMuFrame:
         }
 
         return out_r, out_s
-        '''
         
     # p_mean_variance_reverse for forward noising deltat
     def p_mean_variance_reverse(self, model, pred_ref, xr_t, xs_t, t, clip_denoised=True, denoised_fn=None, model_kwargs=None):
@@ -684,6 +676,67 @@ class GaussianDiffusionMuFrame:
 
         return {"sample_r": sample_r, "sample_s": sample_s, "prev_sample_r": out_r["prev_delta_t"]}
 
+    def p_sample_finetune(
+        self,
+        model,
+        finetune_frame,
+        x_r,
+        x_s,
+        t,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+    ):
+        """
+        Sample x_{t-1} from the model at the given timestep.
+        
+        Inputs:
+        - model: the model to sample from.
+        - x_r: the current noisy reference input, shape [B, C, 1]
+        - x_s: the current noisy shape input, shape [B, C, N]
+        - t: timesteps, shape [B]
+        - clip_denoised: if True, clip the x_start prediction to [-1, 1].
+        - denoised_fn: optional function to post-process the x_start prediction.
+        - cond_fn: an optional conditioning function (e.g. for guidance).
+        - model_kwargs: additional keyword arguments for the model.
+        
+        Returns:
+        A dict containing:
+            - 'sample': a sample from p(x_{t-1} | x_t).
+            - 'pred_xstart': the combined prediction for x₀.
+        """
+        import torch as th
+
+        # Obtain separate outputs for the reference and shape branches.
+        out_r, out_s = self.p_mean_variance_finetune(
+            model,
+            x_r,
+            x_s,
+            t,
+            finetune_frame,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            model_kwargs=model_kwargs,
+        )
+        
+        noise_r = th.randn_like(x_r)
+        noise_s = th.randn_like(x_s)
+        nonzero_mask_r = (
+            (t != 0).float().view(-1, *([1] * (len(x_r.shape) - 1)))
+        )  # no noise when t == 0
+        nonzero_mask_s = (
+            (t != 0).float().view(-1, *([1] * (len(x_s.shape) - 1)))
+        )  # no noise when t == 0
+        if cond_fn is not None:
+            out_r["mean"] = self.condition_mean(cond_fn, out_r, x_r, t, model_kwargs=model_kwargs)
+            out_s["mean"] = self.condition_mean(cond_fn, out_s, x_s, t, model_kwargs=model_kwargs)
+
+        sample_r = out_r["mean"] + nonzero_mask_r * th.exp(0.5 * out_r["log_variance"]) * noise_r
+        sample_s = out_s["mean"] + nonzero_mask_s * th.exp(0.5 * out_s["log_variance"]) * noise_s
+
+        return {"sample_r": sample_r, "sample_s": sample_s, "pred_xstart": out_r["pred_xstart"]+out_s["pred_xstart"]}
+
     def p_sample_loop(
         self,
         model,
@@ -734,8 +787,8 @@ class GaussianDiffusionMuFrame:
         ):
             final = out
             # NOTE: from t=T-1, sample_r will be the action_mean_err
-            results.append({"sample_r": final["sample_r"], "sample_s": final["sample_s"]})
-        final_dict = {"sample_r": final["sample_r"], "sample_s": final["sample_s"]}
+            results.append({"sample_r": final["sample_r"], "sample_s": final["sample_s"], "prev_sample_r":final["prev_sample_r"]})
+        final_dict = {"sample_r": final["sample_r"], "sample_s": final["sample_s"], "prev_sample_r":final["prev_sample_r"]}
         return final_dict, results
 
     def p_sample_loop_progressive(
@@ -820,6 +873,122 @@ class GaussianDiffusionMuFrame:
                 out["sample_r"] = pred_ref
 
                 yield out
+
+    def p_sample_loop_finetune(
+        self,
+        model,
+        shape_r,
+        shape_s,
+        noise_r=None,
+        noise_s=None,
+        finetune_frame=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+    ):
+        """
+        Generate samples from the model.
+        :param model: the model module.
+        :param shape: the shape of the samples, (N, C, H, W).
+        :param noise: if specified, the noise from the encoder to sample.
+                      Should be of the same shape as `shape`.
+        :param clip_denoised: if True, clip x_start predictions to [-1, 1].
+        :param denoised_fn: if not None, a function which applies to the
+            x_start prediction before it is used to sample.
+        :param cond_fn: if not None, this is a gradient function that acts
+                        similarly to the model.
+        :param model_kwargs: if not None, a dict of extra keyword arguments to
+            pass to the model. This can be used for conditioning.
+        :param device: if specified, the device to create the samples on.
+                       If not specified, use a model parameter's device.
+        :param progress: if True, show a tqdm progress bar.
+        :return: a non-differentiable batch of samples.
+        """
+        assert finetune_frame is not None, "Please set finetune frame!"
+        final = None
+        results = [{"sample_r": noise_r, "sample_s": noise_s}]  # NOTE: for t=T, samplr_r is actually in global frame
+        pred_ref = noise_r.clone()
+        for out in self.p_sample_loop_progressive_finetune(
+            model,
+            shape_r,
+            shape_s,
+            noise_r=noise_r,
+            noise_s=noise_s,
+            finetune_frame=finetune_frame,
+            clip_denoised=clip_denoised,
+            denoised_fn=denoised_fn,
+            cond_fn=cond_fn,
+            model_kwargs=model_kwargs,
+            device=device,
+            progress=progress,
+        ):
+            final = out
+            # NOTE: from t=T-1, sample_r will be the action_mean_err
+            results.append({"sample_r": final["sample_r"], "sample_s": final["sample_s"]})
+        final_dict = {"sample_r": final["sample_r"], "sample_s": final["sample_s"]}
+        return final_dict, results
+
+    def p_sample_loop_progressive_finetune(
+        self,
+        model,
+        shape_r,
+        shape_s,
+        noise_r=None,
+        noise_s=None,
+        finetune_frame=None,
+        clip_denoised=True,
+        denoised_fn=None,
+        cond_fn=None,
+        model_kwargs=None,
+        device=None,
+        progress=False,
+    ):
+        """
+        Generate samples from the model and yield intermediate samples from
+        each timestep of diffusion.
+        Arguments are the same as p_sample_loop().
+        Returns a generator over dicts, where each dict is the return value of
+        p_sample().
+        """
+        assert finetune_frame is not None, "Please set finetune frame!"
+        assert noise_r is not None, "Please set img_r!"
+        assert noise_s is not None, "Please set img_s!"
+
+        if device is None:
+            device = next(model.parameters()).device
+        assert isinstance(shape_r, (tuple, list))
+        assert isinstance(shape_s, (tuple, list))
+
+        img_r = noise_r
+        img_s = noise_s
+
+        finetune_steps = range(10)
+        if progress:
+            # Lazy import so that we don't depend on tqdm.
+            from tqdm.auto import tqdm
+
+            finetune_steps = tqdm(finetune_steps)
+
+        for i in finetune_steps:
+            t = th.tensor([0] * shape_s[0], device=device)
+            with th.no_grad():
+                out = self.p_sample_finetune(
+                    model,
+                    finetune_frame,
+                    img_r,
+                    img_s,
+                    t,
+                    clip_denoised=clip_denoised,
+                    denoised_fn=denoised_fn,
+                    cond_fn=cond_fn,
+                    model_kwargs=model_kwargs,
+                )
+                yield out
+                img_r = out["sample_r"]
+                img_s = out["sample_s"]
 
 
     def ddim_sample(

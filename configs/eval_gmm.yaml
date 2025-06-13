@@ -21,10 +21,11 @@ defaults:
 
 seed: 42
 
-# GMM-specific training parameters; some of these will override inference config file.
+# GMM-specific parameters.
 gmm_log_dir: "~/data/gmm_outputs/"
-epochs: 1000
 num_samples: 50
+checkpoint:
+  run_id: ???
 
 resources:
   num_workers: 4

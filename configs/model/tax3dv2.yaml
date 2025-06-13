@@ -13,6 +13,7 @@ joint_encode: True # If True, use joint encoding for point cloud feature
 rel_pos: False # If True, encode relative position
 scene_anchor: False # If True, use scene as the anchor
 frame_type: fixed # (fixed, mu) Type of frame-prediction for the model
+one_hot_recon: False # If True, use one-hot encoding for reconstruction
 
 #####################################################
 # Model-specific Dataset/Data-processing Parameters
@@ -22,11 +23,15 @@ pred_frame: anchor_center # [anchor_center, noisy_goal] frame for goal predictio
 noisy_goal_scale: 0.0 # scale for simulated noisy goal error
 action_context_frame: action_center # [action_center] frame for action context
 
+# These are internal to the model.
+object_scale: null # scale for action normalization
+scene_scale: null # scale for scene normalization
+
 #####################################################
 # Dataset-specific Model Parameters
 #####################################################
 # These are shared and overriden by the dataset config.
-pcd_scale: 1 # Scale range for the point clouds
+pcd_scale: 3.0 # Scale range for the point clouds
 
 #####################################################
 # Model Diffusion Parameters

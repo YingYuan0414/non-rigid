@@ -43,8 +43,13 @@ def pn2_encoder(in_channels, out_channels, model_cfg):
     PointNet++ encoder for point clouds.
     """
     pn2_params = PN2DenseParams()
-    pn2_params.sa1.r = 0.2 * model_cfg.pcd_scale
-    pn2_params.sa2.r = 0.4 * model_cfg.pcd_scale
+    # if model_cfg.object_scale is not None or model_cfg.scene_scale is not None:
+    if model_cfg.object_scale is not None:
+        pn2_params.sa1.r = 0.5 * model_cfg.pcd_scale
+        pn2_params.sa2.r = 1.0 * model_cfg.pcd_scale
+    else:
+        pn2_params.sa1.r = 0.2 * model_cfg.pcd_scale
+        pn2_params.sa2.r = 0.4 * model_cfg.pcd_scale
 
     class PN2DenseWrapper(nn.Module):
         def __init__(self, in_channels, out_channels, p):

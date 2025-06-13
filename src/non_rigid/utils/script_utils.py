@@ -25,6 +25,7 @@ from non_rigid.models.tax3d_v2 import (
 from non_rigid.datasets.dedo import DedoDataModule
 from non_rigid.datasets.dro import DexDataModule
 from non_rigid.datasets.rigid import RigidDataModule
+from non_rigid.datasets.articulated import ArticulatedDataModule
 
 PROJECT_ROOT = str(pathlib.Path(__file__).parent.parent.parent.parent.resolve())
 
@@ -33,6 +34,12 @@ PROJECT_ROOT = str(pathlib.Path(__file__).parent.parent.parent.parent.resolve())
 def create_model(cfg):
     # setting dataset-specific model params
     cfg.model.pcd_scale = cfg.dataset.pcd_scale
+
+    # if normalizing point clouds, set pcd_scale to 1
+    if cfg.model.object_scale is not None:
+        cfg.model.pcd_scale = cfg.model.object_scale
+    elif cfg.model.scene_scale is not None:
+        cfg.model.pcd_scale = cfg.model.scene_scale
 
     if cfg.model.name == "df_cross":
         network_fn = DiffusionTransformerNetwork
@@ -64,7 +71,10 @@ def create_datamodule(cfg):
     cfg.dataset.action_context_frame = cfg.model.action_context_frame
 
     if cfg.dataset.material == "deform":
-        datamodule_fn = DedoDataModule
+        if cfg.dataset.name == "dedo":
+            datamodule_fn = DedoDataModule
+        elif cfg.dataset.name == "articulated":
+            datamodule_fn = ArticulatedDataModule
     elif cfg.dataset.material == "rigid":
         datamodule_fn = RigidDataModule
     elif cfg.dataset.material == "hand":
@@ -133,8 +143,20 @@ def load_checkpoint_config_from_wandb(current_cfg, task_overrides, entity, proje
     
     # small edge case - if 'eval', ignore 'train_size'/'val_size'
     if current_cfg.mode == "eval":
-        current_cfg.dataset.train_size = None
-        current_cfg.dataset.val_size = None
+        # TODO: unify the following
+        # For DEDO
+        if "train_size" in current_cfg.dataset.keys():
+            current_cfg.dataset.train_size = None
+        if "val_size" in current_cfg.dataset.keys():
+            current_cfg.dataset.val_size = None
+        # For RPDiff
+        if "train_dataset_size" in current_cfg.dataset.keys():
+            current_cfg.dataset.train_dataset_size = None
+        if "val_dataset_size" in current_cfg.dataset.keys():
+            current_cfg.dataset.val_dataset_size = None
+        if "test_dataset_size" in current_cfg.dataset.keys():
+            current_cfg.dataset.test_dataset_size = None
+
     current_cfg.dataset.data_dir = current_data_dir
 
     return current_cfg

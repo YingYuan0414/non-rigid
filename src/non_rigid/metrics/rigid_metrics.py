@@ -7,10 +7,7 @@ def svd_estimation(
     source: torch.Tensor,
     target: torch.Tensor,
     return_magnitude: bool = False,
-) -> Union[
-    Tuple[torch.Tensor, torch.Tensor], 
-    Tuple[torch.Tensor, torch.Tensor]
-]:
+):
     """
     Estimate translation and rotation using SVD-based Procrustes analysis for batched inputs,
     with an option to return the magnitudes of errors.
@@ -47,31 +44,35 @@ def svd_estimation(
     U, _, Vt = torch.linalg.svd(H)  # U: (B, C, C), Vt: (B, C, C)
 
     # Compute the rotation matrices
-    estimated_rotations = torch.bmm(Vt.transpose(1, 2), U.transpose(1, 2))  # Shape (B, C, C)
+    R = torch.bmm(Vt.transpose(1, 2), U.transpose(1, 2))  # Shape (B, C, C)
 
     # Ensure proper rotation (det(R) = 1, not -1)
-    det_check = torch.det(estimated_rotations) < 0
+    det_check = torch.det(R) < 0
     if det_check.any():
         Vt[det_check, -1, :] *= -1
-        estimated_rotations = torch.bmm(Vt.transpose(1, 2), U.transpose(1, 2))
-
-    # Compute the translations in world-frame
-    estimated_translations = target_centroid - source_centroid  # Shape (B, C)
+        R = torch.bmm(Vt.transpose(1, 2), U.transpose(1, 2))
 
     if return_magnitude:
-        # Compute translation norms
+        # Compute translation norms. Note that here we are estimating the centroid difference!
+        estimated_translations = target_centroid - source_centroid  # Shape (B, C)
         translation_errors = torch.norm(estimated_translations, dim=1)  # Shape (B,)
 
         # Compute rotation angles in degrees
-        traces = torch.einsum("bii->b", estimated_rotations)  # Trace of each rotation matrix
+        traces = torch.einsum("bii->b", R)  # Trace of each rotation matrix
         clamped_cos = torch.clamp((traces - 1) / 2, min=-1.0, max=1.0)
         rotation_angles = torch.acos(clamped_cos)  # In radians
         rotation_errors = torch.rad2deg(rotation_angles)     # Shape (B,)
 
         return translation_errors, rotation_errors
+    else:
+        t = target_centroid - torch.bmm(R, source_centroid.unsqueeze(-1)).squeeze(-1)  # (B, C)
 
-    return estimated_translations, estimated_rotations
+        # Construct full SE(3) matrix: (B, 4, 4)
+        T = torch.eye(4, device=source.device).unsqueeze(0).repeat(B, 1, 1)  # (B, 4, 4)
+        T[:, :3, :3] = R
+        T[:, :3, 3] = t
 
+        return T
 
 
 

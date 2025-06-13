@@ -16,6 +16,8 @@ COMMAND=$@
 
 echo "Evaluating model at checkpoint $CHECKPOINT with command: $COMMAND."
 python eval_deform.py \
+    wandb.group=rigid \
+    wandb.project=corl2025_tax3dv2 \
     resources.gpus=[${GPU_INDEX}] \
     checkpoint.run_id=${CHECKPOINT} \
     $COMMAND

@@ -22,20 +22,25 @@ class RPDiffDataset(data.Dataset):
         self.dataset_cfg = dataset_cfg
         self.rpdiff_task_name = dataset_cfg.rpdiff_task_name
         self.rpdiff_task_type = dataset_cfg.rpdiff_task_type
-
+        
         # if eval_mode = True, we turn off occlusion
         self.eval_mode = False if self.type == "train" else True
-
+            
         # data loading
         self.dataset_dir = self.root / self.rpdiff_task_name / self.rpdiff_task_type
         self.split_dir = self.dataset_dir / "split_info"
         self.split_file = f"{self.type}_split.txt" if self.type != "val" else "train_val_split.txt"
 
+        
+        if 'preprocess' in dataset_cfg and dataset_cfg.preprocess:
+            self.dataset_dir = self.dataset_dir / "preprocessed"
+            print(f"Loading RPDiff Preprocessed Dataset from {self.dataset_dir}")
+        else:
+            print(f"Loading RPDiff Dataset from {self.dataset_dir}")
+        
         # setting sample sizes
         self.sample_size_action = self.dataset_cfg.sample_size_action
         self.sample_size_anchor = self.dataset_cfg.sample_size_anchor
-
-        print(f"Loading RPDiff dataset from {self.dataset_dir}")
 
         with open(os.path.join(self.split_dir, self.split_file), "r") as file:
             self.demo_files = [f"{self.dataset_dir}/{line.strip()}" for line in file]
@@ -64,15 +69,12 @@ class RPDiffDataset(data.Dataset):
         child_start_pcd = demo['multi_obj_start_pcd'].item()['child']
         parent_final_pcd = demo['multi_obj_final_pcd'].item()['parent']
         child_final_pcd = demo['multi_obj_final_pcd'].item()['child']
-        #relative_trans = demo['relative_trans']
 
         action_pc = torch.as_tensor(child_start_pcd).float()
         anchor_pc = torch.as_tensor(parent_start_pcd).float()
         goal_action_pc = torch.as_tensor(child_final_pcd).float()
         goal_anchor_pc = torch.as_tensor(parent_final_pcd).float()  # same as anchor_pc
-        #relative_trans = torch.as_tensor(relative_trans).float()
 
-        # TODO: apply scale factor to adjust relative_trans aw
         action_pc *= self.dataset_cfg.pcd_scale_factor
         anchor_pc *= self.dataset_cfg.pcd_scale_factor
         goal_action_pc *= self.dataset_cfg.pcd_scale_factor
@@ -100,9 +102,6 @@ class RPDiffDataset(data.Dataset):
                 )
                 action_seg = action_seg[action_pc_indices.squeeze(0)]
                 goal_action_pc = goal_action_pc[action_pc_indices.squeeze(0)]
-                if anchor_pc.shape[0] < self.dataset_cfg.sample_size_anchor:
-                    print("Encounter action points of shape {} with less than min_num_points. No augmentations!".format(anchor_pc.shape[0]))
-                    print(self.demo_files[index % self.num_demos])
 
                 anchor_pc, anchor_pc_indices = maybe_apply_augmentations(
                     anchor_pc,
@@ -118,10 +117,6 @@ class RPDiffDataset(data.Dataset):
                         * self.dataset_cfg.pcd_scale_factor,
                     },
                 )
-
-                if anchor_pc.shape[0] < self.dataset_cfg.sample_size_anchor:
-                    print("Encounter anchor points of shape {} with less than min_num_points. No augmentations!".format(anchor_pc.shape[0]))
-                    print(self.demo_files[index % self.num_demos])
 
                 anchor_seg = anchor_seg[anchor_pc_indices.squeeze(0)]
 
@@ -175,7 +170,7 @@ class RPDiffDataset(data.Dataset):
         item["seg_anchor"] = anchor_seg
         item["T_goal2world"] = T_goal2world.get_matrix().squeeze(0) # Transform from goal action frame to world frame
         item["T_action2world"] = T_action2world.get_matrix().squeeze(0) # Transform from action frame to world frame
-
+        
         # Training-specific labels.
         # TODO: eventually, rename this key to "point"
         item["pc"] = goal_action_pc # Ground-truth goal action points in the scene frame
@@ -227,12 +222,9 @@ class RigidDataModule(L.LightningModule):
         # if not in train mode, don't use rotation augmentations
         if self.stage != "fit":
             print("-------Turning off rotation augmentation for validation/inference.-------")
-            self.dataset_cfg.action_transform_type = "identity"
-            self.dataset_cfg.anchor_transform_type = "identity"
-            self.dataset_cfg.action_translation_variance = 0
-            self.dataset_cfg.action_rotation_variance = 0
-            self.dataset_cfg.anchor_translation_variance = 0
-            self.dataset_cfg.anchor_rotation_variance = 0
+            self.dataset_cfg.scene_transform_type = "identity"
+            self.dataset_cfg.rotation_variance = 0.0
+            self.dataset_cfg.translation_variance = 0.0
 
         self.train_dataset = DATASET_FN[self.dataset_cfg.name](
             self.root, self.dataset_cfg, "train")
@@ -250,6 +242,8 @@ class RigidDataModule(L.LightningModule):
             num_workers=self.num_workers,
             shuffle=True if self.stage == "fit" else False,
             drop_last=True,
+            persistent_workers=True, 
+            pin_memory=False
         )
 
     def val_dataloader(self):

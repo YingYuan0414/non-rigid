@@ -1,0 +1,14 @@
+# @package _global_
+
+defaults:
+  - /eval_rigid
+  - /_logging
+  - override /dataset: rpdiff
+  - override /model: df_cross
+  - override /inference: rpdiff_df_cross
+  - _self_
+
+dataset:
+  rpdiff_task_name: mug_rack_easy_single
+  rpdiff_task_type: task_name_mug_on_rack
+

@@ -74,7 +74,7 @@ class DedoDataset(BaseDataset):
             f'hole={self.hole} ' + \
             f'robot={self.robot} ' + \
             f'num_anchors={self.num_anchors} ' + \
-            'dp3'
+            'dp3 big'
         )
         self.zarr_dir = os.path.join(root_dir, dataset_dir)
         train_zarr_path = os.path.join(self.zarr_dir, 'train.zarr')

@@ -488,6 +488,7 @@ class GaussianDiffusionDDRDSeparate:
             out_s["mean"] = self.condition_mean(cond_fn, out_s, x_s, t, model_kwargs=model_kwargs)
 
         sample_r = out_r["mean"] + nonzero_mask_r * th.exp(0.5 * out_r["log_variance"]) * noise_r
+        # sample_r = out_r["mean"]
         sample_s = out_s["mean"] + nonzero_mask_s * th.exp(0.5 * out_s["log_variance"]) * noise_s
 
         return {"sample_r": sample_r, "sample_s": sample_s, "pred_xstart": out_r["pred_xstart"]+out_s["pred_xstart"]}
@@ -606,7 +607,8 @@ class GaussianDiffusionDDRDSeparate:
     def ddim_sample(
         self,
         model,
-        x,
+        x_r,
+        x_s,
         t,
         clip_denoised=True,
         denoised_fn=None,
@@ -618,39 +620,61 @@ class GaussianDiffusionDDRDSeparate:
         Sample x_{t-1} from the model using DDIM.
         Same usage as p_sample().
         """
-        out = self.p_mean_variance(
+        out_r, out_s = self.p_mean_variance(
             model,
-            x,
+            x_r,
+            x_s,
             t,
             clip_denoised=clip_denoised,
             denoised_fn=denoised_fn,
             model_kwargs=model_kwargs,
         )
         if cond_fn is not None:
-            out = self.condition_score(cond_fn, out, x, t, model_kwargs=model_kwargs)
+            out_r = self.condition_score(cond_fn, out_r, x_r, t, model_kwargs=model_kwargs)
+            out_s = self.condition_score(cond_fn, out_s, x_s, t, model_kwargs=model_kwargs)
 
         # Usually our model outputs epsilon, but we re-derive it
         # in case we used x_start or x_prev prediction.
-        eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
+        # eps = self._predict_eps_from_xstart(x, t, out["pred_xstart"])
+        eps_r = self._predict_eps_from_xstart(x_r, t, out_r["pred_xstart"])
+        eps_s = self._predict_eps_from_xstart(x_s, t, out_s["pred_xstart"])
 
-        alpha_bar = _extract_into_tensor(self.alphas_cumprod, t, x.shape)
-        alpha_bar_prev = _extract_into_tensor(self.alphas_cumprod_prev, t, x.shape)
-        sigma = (
+        alpha_bar_r = _extract_into_tensor(self.alphas_cumprod, t, x_r.shape)
+        alpha_bar_s = _extract_into_tensor(self.alphas_cumprod, t, x_s.shape)
+        alpha_bar_prev_r = _extract_into_tensor(self.alphas_cumprod_prev, t, x_r.shape)
+        alpha_bar_prev_s = _extract_into_tensor(self.alphas_cumprod_prev, t, x_s.shape)
+        sigma_r = (
             eta
-            * th.sqrt((1 - alpha_bar_prev) / (1 - alpha_bar))
-            * th.sqrt(1 - alpha_bar / alpha_bar_prev)
+            * th.sqrt((1 - alpha_bar_prev_r) / (1 - alpha_bar_r))
+            * th.sqrt(1 - alpha_bar_r / alpha_bar_prev_r)
+        )
+        sigma_s = (
+            eta
+            * th.sqrt((1 - alpha_bar_prev_s) / (1 - alpha_bar_s))
+            * th.sqrt(1 - alpha_bar_s / alpha_bar_prev_s)
         )
         # Equation 12.
-        noise = th.randn_like(x)
-        mean_pred = (
-            out["pred_xstart"] * th.sqrt(alpha_bar_prev)
-            + th.sqrt(1 - alpha_bar_prev - sigma ** 2) * eps
+        noise_r = th.randn_like(x_r)
+        noise_s = th.randn_like(x_s)
+        mean_pred_r = (
+            out_r["pred_xstart"] * th.sqrt(alpha_bar_prev_r)
+            + th.sqrt(1 - alpha_bar_prev_r - sigma_r ** 2) * eps_r
         )
-        nonzero_mask = (
-            (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+        mean_pred_s = (
+            out_s["pred_xstart"] * th.sqrt(alpha_bar_prev_s)
+            + th.sqrt(1 - alpha_bar_prev_s - sigma_s ** 2) * eps_s
+        )
+        nonzero_mask_r = (
+            (t != 0).float().view(-1, *([1] * (len(x_r.shape) - 1)))
         )  # no noise when t == 0
-        sample = mean_pred + nonzero_mask * sigma * noise
-        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+        nonzero_mask_s = (
+            (t != 0).float().view(-1, *([1] * (len(x_s.shape) - 1)))
+        )
+        sample_r = mean_pred_r + nonzero_mask_r * sigma_r * noise_r
+        sample_s = mean_pred_s + nonzero_mask_s * sigma_s * noise_s
+
+        # return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+        return {"sample_r": sample_r, "sample_s": sample_s, "pred_xstart": out_r["pred_xstart"] + out_s["pred_xstart"]}
 
     def ddim_reverse_sample(
         self,
@@ -693,8 +717,10 @@ class GaussianDiffusionDDRDSeparate:
     def ddim_sample_loop(
         self,
         model,
-        shape,
-        noise=None,
+        shape_r,
+        shape_s,
+        noise_r=None,
+        noise_s=None,
         clip_denoised=True,
         denoised_fn=None,
         cond_fn=None,
@@ -708,10 +734,13 @@ class GaussianDiffusionDDRDSeparate:
         Same usage as p_sample_loop().
         """
         final = None
-        for sample in self.ddim_sample_loop_progressive(
+        results = [{"sample_r": noise_r, "sample_s": noise_s}]
+        for out in self.ddim_sample_loop_progressive(
             model,
-            shape,
-            noise=noise,
+            shape_r,
+            shape_s,
+            noise_r=None,  # BUG!
+            noise_s=None,  # BUG!
             clip_denoised=clip_denoised,
             denoised_fn=denoised_fn,
             cond_fn=cond_fn,
@@ -720,14 +749,18 @@ class GaussianDiffusionDDRDSeparate:
             progress=progress,
             eta=eta,
         ):
-            final = sample
-        return final["sample"]
+            final = out
+            results.append({"sample_r": final["sample_r"], "sample_s": final["sample_s"]})
+        final_dict = {"sample_r": final["sample_r"], "sample_s": final["sample_s"]}
+        return final_dict, results
 
     def ddim_sample_loop_progressive(
         self,
         model,
-        shape,
-        noise=None,
+        shape_r,
+        shape_s,
+        noise_r=None,
+        noise_s=None,
         clip_denoised=True,
         denoised_fn=None,
         cond_fn=None,
@@ -743,11 +776,17 @@ class GaussianDiffusionDDRDSeparate:
         """
         if device is None:
             device = next(model.parameters()).device
-        assert isinstance(shape, (tuple, list))
-        if noise is not None:
-            img = noise
+        assert isinstance(shape_r, (tuple, list))
+        assert isinstance(shape_s, (tuple, list))
+        if noise_r is not None:
+            img_r = noise_r
         else:
-            img = th.randn(*shape, device=device)
+            img_r = th.randn(*shape_r, device=device)
+        if noise_s is not None:
+            img_s = noise_s
+        else:
+            img_s = th.randn(*shape_s, device=device)
+
         indices = list(range(self.num_timesteps))[::-1]
 
         if progress:
@@ -757,11 +796,12 @@ class GaussianDiffusionDDRDSeparate:
             indices = tqdm(indices)
 
         for i in indices:
-            t = th.tensor([i] * shape[0], device=device)
+            t = th.tensor([i] * shape_s[0], device=device)
             with th.no_grad():
                 out = self.ddim_sample(
                     model,
-                    img,
+                    img_r,
+                    img_s,
                     t,
                     clip_denoised=clip_denoised,
                     denoised_fn=denoised_fn,
@@ -770,7 +810,8 @@ class GaussianDiffusionDDRDSeparate:
                     eta=eta,
                 )
                 yield out
-                img = out["sample"]
+                img_r = out["sample_r"]
+                img_s = out["sample_s"]
 
     def _vb_terms_bpd(self, model, xr_start, xs_start, xr_t, xs_t, t, clip_denoised=True, model_kwargs=None):
         """

@@ -5,6 +5,7 @@ import json
 import omegaconf
 import torch
 import wandb
+import os
 from pytorch3d.transforms import Transform3d, Translate
 
 from non_rigid.utils.script_utils import (
@@ -16,29 +17,13 @@ from non_rigid.utils.script_utils import (
 from non_rigid.nets.dgcnn import DGCNN
 from non_rigid.metrics.flow_metrics import flow_rmse
 from non_rigid.utils.pointcloud_utils import expand_pcd
+from non_rigid.models.gmm_predictor import FrameGMMPredictor
 from non_rigid.utils.vis_utils import visualize_sampled_predictions, visualize_diffusion_timelapse
 from tqdm import tqdm
 import numpy as np
 
 import rpad.visualize_3d.plots as vpl
 from plotly import graph_objects as go
-
-# def visualize_batched_point_clouds(point_clouds):
-#     """
-#     Helper function to visualize a list of batched point clouds. This is meant to be used
-#     when visualizing action/anchor/prediction point clouds, without having to add
-
-#     point_clouds: list of point clouds, each of shape (B, N, 3)
-#     """
-#     pcs = [pc.cpu().flatten(0, 1) for pc in point_clouds]
-#     segs = []
-#     for i, pc in enumerate(pcs):
-#         segs.append(torch.ones(pc.shape[0]).int() * i)
-
-#     return vpl.segmentation_fig(
-#         torch.cat(pcs),
-#         torch.cat(segs),
-#     )
 
 @torch.no_grad()
 @hydra.main(config_path="../configs", config_name="eval", version_base="1.3")
@@ -93,8 +78,31 @@ def main(cfg):
     ######################################################################
     # Load the reference frame predictor, if necessary.
     ######################################################################
-
-    # TODO: IMPLEMENT THIS
+    if cfg.gmm is not None:
+        # GMM can only be used with noisy goal models.
+        if cfg.model.pred_frame != "noisy_goal":
+            raise ValueError("GMM can only be used with noisy goal models.")
+        
+        # Grab config file from saved run.
+        exp_name = os.path.join(
+            os.path.expanduser(cfg.gmm_log_dir),
+            cfg.gmm,
+        )
+        if not os.path.exists(exp_name):
+            raise ValueError(f"Experiment directory {exp_name} does not exist - train this model first.")
+        gmm_cfg = omegaconf.OmegaConf.load(os.path.join(exp_name, "config.yaml"))
+        
+        # Creating GMM network.
+        network, _ = create_model(gmm_cfg)
+        gmm_model = FrameGMMPredictor(network, gmm_cfg.model, device)
+        gmm_model.load_state_dict(
+            torch.load(
+                os.path.join(exp_name, "checkpoints", f"epoch_{gmm_cfg.epochs}.pt")
+            )
+        )
+        gmm_model.eval()
+    else:
+        gmm_model = None
 
     ######################################################################
     # Create the datamodule. This is just to initialize the datasets - we are
@@ -167,12 +175,24 @@ def main(cfg):
         for i in tqdm(indices):
             # Index and batchify item.
             item = dataset[i]
-            batch = [{key: item[key].to(device) for key in eval_keys}]
+            batch = [{key: item[key] for key in eval_keys}]
             batch = {key: torch.stack([item[key] for item in batch]) for key in eval_keys}
 
             # Generate predictions.
-            batch = model.update_batch_frames(batch, update_labels=True)
-            pred_dict = model.predict(batch, num_samples, progress=False, full_prediction=True)
+            if gmm_model is not None:
+                # Yucky hack for GMM; need to expand point clouds first for WTA GMM samples.
+                gmm_batch = {key: expand_pcd(value, num_samples) for key, value in batch.items()}
+                gmm_batch = model.update_batch_frames(gmm_batch, update_labels=True, gmm_model=gmm_model)
+                batch = model.update_batch_frames(batch, update_labels=True)
+                pred_dict = model.predict(gmm_batch, 1, progress=False, full_prediction=True)
+            else:
+                batch = model.update_batch_frames(batch, update_labels=True)
+                pred_dict = model.predict(batch, num_samples, progress=False, full_prediction=True)
+
+            #batch = model.update_batch_frames(batch, update_labels=True)
+            #pred_dict = model.predict(batch, num_samples, progress=False, full_prediction=True)
+            batch = {key: value.to(device) for key, value in batch.items()}
+
             viz_args = model.get_viz_args(batch, 0)
 
             # Get point clouds in world coordinates.
@@ -181,22 +201,34 @@ def main(cfg):
             action_pc_world = viz_args["pc_action_viz"].cpu().numpy()
             anchor_pc_world = viz_args["pc_anchor_viz"].cpu().numpy()
 
+            # Another hack; if scene-as-anchor, revert back to just anchor.
+            if cfg.model.scene_anchor:
+                anchor_pc_world = anchor_pc_world[:anchor_pc_world.shape[0] // 2, :]
+
+            # Create GMM viz args, if needed.
+            if gmm_model is not None:
+                gmm_viz = {
+                    "gmm_probs": gmm_batch["gmm_probs"].cpu().numpy(),
+                    "gmm_means": gmm_batch["gmm_means"].cpu().numpy(),
+                    "sampled_idxs": gmm_batch["sampled_idxs"].cpu().numpy(),
+                }
+            else:
+                gmm_viz = None
+
             # visualize sampled predictions
             context = {
                 "Action": action_pc_world,
                 "Anchor": anchor_pc_world,
             }
-            # # For TAX3Dv2, also visualize reference frame predictions.
-            # if cfg.model.tax3dv2:
-            #     context["Ref Frame"] = pred_dict["ref_frame_world"].squeeze().cpu().numpy()
             fig = visualize_sampled_predictions(
                 ground_truth = gt_pc_world,
                 context = context,
                 predictions = pred_pc_world,
+                gmm_viz = gmm_viz,
             )
             fig.show()
 
-            # visualize diffusion timelapse
+            # Visualize diffusion timelapse.
             VIZ_IDX = 4 # 0
             results = [res[VIZ_IDX].cpu().numpy() for res in pred_dict["results_world"]]
             # For TAX3Dv2, also grab logit/residual predictions.
@@ -221,7 +253,7 @@ def main(cfg):
     # Run the model on the train/val/test sets.
     ######################################################################
     train_indices = []
-    val_indices = [0, 1, 2, 3]
+    val_indices = [8]
     val_ood_indices = []
     model.to(device)
     run_vis(datamodule.train_dataset, model, train_indices)
