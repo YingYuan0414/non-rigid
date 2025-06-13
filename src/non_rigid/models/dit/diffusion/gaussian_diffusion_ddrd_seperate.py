@@ -912,7 +912,7 @@ class GaussianDiffusionDDRDSeparate:
         w_r = 1.0 - coeff
         return w_r, w_s
 
-    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None, object_pc=None, object_normals=None, penetration_weight=0):
+    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None, object_pc=None, object_normals=None, T_action2world=None, penetration_weight=0):
         """
         Compute training losses for a single timestep using separate forward processes for
         the reference (R) and shape (S) components.
@@ -1046,7 +1046,16 @@ class GaussianDiffusionDDRDSeparate:
                 pred_xstart_s = self._predict_xstart_from_eps(xs_t, t, model_output_s)
                 pred_xstart = pred_xstart_r + pred_xstart_s
                 pred_xstart = pred_xstart.permute(0, 2, 1)
-                loss_depth = calculate_depth(pred_xstart, object_pc, object_normals)
+                
+                # transform pred_xstart to world coordinates
+                B, N, _ = pred_xstart.shape
+                ones = torch.ones((B, N, 1), device=pred_xstart.device)
+                pred_xstart_h = torch.cat([pred_xstart, ones], dim=-1)  # [B, N, 4]
+                assert T_action2world is not None, "T_action2world must be provided for penetration loss."
+                pc_world_homo = torch.bmm(pred_xstart_h, T_action2world.transpose(1, 2))
+                pc_world = pc_world_homo[:, :, :3]
+
+                loss_depth = calculate_depth(pc_world, object_pc, object_normals)
                 loss_depth = loss_depth.mean()
 
             # Optionally, apply time-based weighting.
