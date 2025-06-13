@@ -186,6 +186,7 @@ class DexDataset(data.Dataset):
         # TODO: eventually, rename this key to "point"
         item["pc"] = goal_action_pc # Ground-truth goal action points in the scene frame
         item["flow"] = goal_flow # Ground-truth flow (cross-frame) to action points
+        item["object_names"] = object_name
         
         if self.dataset_cfg.pred_frame == "noisy_goal":
             # "Simulate" the GMM prediction as noisy goal.
@@ -267,7 +268,7 @@ class DexDataModule(L.LightningDataModule):
 def cloth_collate_fn(batch):
     # batch can contain a list of dictionaries
     # we need to convert those to a dictionary of lists
-    dict_keys = ["deform_data", "rigid_data"]
+    dict_keys = ["deform_data", "rigid_data", "object_names"]
     keys = batch[0].keys()
     out = {k: None for k in keys}
     for k in keys:

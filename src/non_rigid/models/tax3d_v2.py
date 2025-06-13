@@ -111,6 +111,7 @@ class TAX3Dv2BaseModule(L.LightningModule):
             self.num_training_steps = self.run_cfg.num_training_steps
             self.lr_warmup_steps = self.run_cfg.lr_warmup_steps
             self.additional_train_logging_period = self.run_cfg.additional_train_logging_period
+            self.penetration_weight = self.run_cfg.penetration_weight
         elif self.mode == "eval":
             self.run_cfg = cfg.inference
             # inference-specific params
@@ -221,14 +222,20 @@ class TAX3Dv2BaseModule(L.LightningModule):
             x_start=ground_truth,
             t=t,
             model_kwargs=model_kwargs,
+            object_names= batch["object_names"],
+            penetration_weight = self.penetration_weight,
             # noise=noise,
         )
         loss_r = loss_dict["loss_r"].mean()
         loss_s = loss_dict["loss_s"].mean()
+        if "loss_depth" in loss_dict:
+            loss_depth = loss_dict["loss_depth"].mean()
+        else:
+            loss_depth = torch.tensor(0.0, device=self.device)
         
         loss = loss_dict["loss"].mean()
 
-        return None, loss, loss_r, loss_s
+        return None, loss, loss_r, loss_s, loss_depth
 
     @torch.no_grad()
     def predict(self, batch, num_samples, unflatten=False, progress=True, full_prediction=True):
@@ -430,14 +437,15 @@ class TAX3Dv2BaseModule(L.LightningModule):
 
         batch = self.update_batch_frames(batch, update_labels=True)
 
-        _, loss, loss_r, loss_s = self(batch, t)
+        _, loss, loss_r, loss_s, loss_depth = self(batch, t)
         #########################################################
         # logging training metrics
         #########################################################
         self.log_dict(
             {"train/loss": loss,
             "train/loss_r": loss_r,
-            "train/loss_s": loss_s},
+            "train/loss_s": loss_s,
+            "train/loss_depth": loss_depth,},
             add_dataloader_idx=False,
             prog_bar=True,
         )

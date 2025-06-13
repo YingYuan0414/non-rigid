@@ -8,6 +8,7 @@ grad_clip_norm: 1.0
 num_training_steps: None # Set by the training loop.
 sample_size: None # Set by the training loop, from dataset config.
 sample_size_anchor: None # Set by the training loop, from dataset config.
+penetration_weight: 0.0 # Weight for the penetration loss
 
 check_val_every_n_epochs: 200
 num_wta_trials: 10
